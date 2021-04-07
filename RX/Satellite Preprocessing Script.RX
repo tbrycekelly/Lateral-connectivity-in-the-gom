@@ -1,0 +1,183 @@
+library(TheSource)
+library(ncdf4)
+source('source.r')
+source('SATELLITE.source.r')
+
+
+while (T) {
+  #### Satellite Preprocessing
+  message(Sys.time(), ': Rebuilding Satellite Index...')
+  summary = rebuild.satellite.index(dir = 'Z:/Data/Satellite/Raw/')
+  
+  l = which(summary$Month == 5 & summary$Timeframe == '8D' & summary$Param == 'POC.poc.4km' & summary$Resolution == '4km')
+  times = sample(unique(summary$Datetime[l])) ## Random order
+  conv = function(x){x/12/8.625}
+  
+  
+  for (i in 1:length(times)) {
+    
+    l = which(summary$Datetime == times[i] & summary$Month == 5 & summary$Timeframe == '8D' & summary$Param == 'POC.poc.4km' & summary$Resolution == '4km')
+    
+    message(Sys.time(), ': Loading satellite POC for ', times[i], ' (n = ', length(l),', ', i, '/', length(times),')')
+    satellite = read.satellite('Z:/Data/Satellite/Raw/', summary$File[l], trim = T, lon = c(-99, -79), lat = c(18,31), conv = conv)
+    file.name = paste0('Z:/Data/Taylor/_rdata/Satellite POC.8k.', get.year(satellite$times$mid), '.', get.month(satellite$times$mid), '.', get.day(satellite$times$mid), '.rdata')
+    image.file = paste0('Z:/Data/Taylor/_figure/Satellite POC.8k.', get.year(satellite$times$mid), '.', get.month(satellite$times$mid), '.', get.day(satellite$times$mid), '.png')
+    
+    if (file.exists(file.name) & file.mtime(file.name) > file.mtime('SATELLITE.source.r')) {
+      message(Sys.time(), ': File exists. Skipping.')
+    } else {
+      message(Sys.time(), ': Reducing to 8km spacing.')
+      ## Reduce data into 8km bins
+      l.lon = c(1:floor(length(satellite$lon)/2)) * 2
+      l.lat = c(1:floor(length(satellite$lat)/2)) * 2
+      field = matrix(0, nrow = length(l.lon), ncol = length(l.lat))
+      
+      for (k in 1:length(l.lon)) {
+        for (j in 1:length(l.lat)) {
+          field[k, j] = mean(satellite$field[l.lon[c(k,k,k-1,k-1)], l.lat[c(j,j-1,j,j-1)]], na.rm = T)
+        }
+      }
+      satellite$field = field
+      satellite$lon = satellite$lon[l.lon]
+      satellite$lat = satellite$lat[l.lat]
+      satellite$grid = NULL
+      
+      satellite$cloud.free = length(which(is.na(satellite$field))) / length(satellite$field)
+      message(Sys.time(), ': Percent cloud free: ', format(satellite$cloud.free*100, digits = 1), '%')
+      
+      
+      dx = matrix(0, nrow = length(satellite$lon), ncol = length(satellite$lat))
+      dy = matrix(0, nrow = length(satellite$lon), ncol = length(satellite$lat))
+      
+      for (i in 1:length(satellite$lon)) {
+        for (j in 1:length(satellite$lat)) {
+          if (i == 1) {
+            dx[i,j] = geosphere::distCosine(p1 = c(satellite$lon[2], satellite$lat[j]), p2 = c(satellite$lon[1], satellite$lat[j]))
+          } else {
+            dx[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[j]), p2 = c(satellite$lon[i-1], satellite$lat[j]))
+          }
+          if (j == 1) {
+            dy[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[2]), p2 = c(satellite$lon[i], satellite$lat[1]))
+          } else {
+            dy[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[j]), p2 = c(satellite$lon[i], satellite$lat[j-1]))
+          }
+        }
+      }
+      satellite$dx = dx
+      satellite$dy = dy
+      
+      ## Add advection
+      satellite$adv = calc.oscar.advdiff(satellite)
+      
+      ## Save output
+      message(Sys.time(), ': Saving to file ', file.name)
+      save(satellite, file = file.name)
+      
+      message(Sys.time(), ': Printing pictures to -> ', image.file)
+      png(image.file, width = 1600, 1200)
+      par(mfrow=c(2,2), plt = c(0.1,0.9,0.1,0.8))
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$field, pal = 'ocean.matter', zlim = c(0,2))
+      redraw.map(map); mtext('SSS', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$adv$U/(satellite$dx * satellite$dy), pal = 'ocean.balance', zlim = c(-1,1))
+      redraw.map(map); mtext('MLR1', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, sqrt(satellite$adv$U^2 + satellite$adv$V^2)/(satellite$dx * satellite$dy), pal = 'inferno', zlim = c(0,2))
+      redraw.map(map); mtext('MLR1-MLR2', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$adv$V/(satellite$dx * satellite$dy), pal = 'ocean.balance', zlim = c(-1,1))
+      redraw.map(map); mtext('MLR2', cex = 0.7, adj = 0)
+      
+      dev.off()
+    }
+  }
+  
+  
+  
+  for (i in 1:length(times)) {
+    
+    l = which(summary$Datetime == times[i] & summary$Month == 5 & summary$Timeframe == '8D' & summary$Param == 'POC.poc.4km' & summary$Resolution == '4km')
+    
+    message(Sys.time(), ': Loading satellite POC for ', times[i], ' (n = ', length(l),', ', i, '/', length(times),')')
+    satellite = read.satellite('Z:/Data/Satellite/Raw/', summary$File[l], trim = T, lon = c(-99, -79), lat = c(18,31), conv = conv)
+    file.name = paste0('Z:/Data/Taylor/_rdata/Satellite POC.4k.', get.year(satellite$times$mid), '.', get.month(satellite$times$mid), '.', get.day(satellite$times$mid), '.rdata')
+    image.file = paste0('Z:/Data/Taylor/_figure/Satellite POC.4k.', get.year(satellite$times$mid), '.', get.month(satellite$times$mid), '.', get.day(satellite$times$mid), '.png')
+    
+    if (file.exists(file.name) & file.mtime(file.name) > file.mtime('SATELLITE.source.r')) {
+      message(Sys.time(), ': File exists. Skipping.')
+    } else {
+      
+      satellite$cloud.free = length(which(is.na(satellite$field))) / length(satellite$field)
+      message(Sys.time(), ': Percent cloud free: ', format(satellite$cloud.free*100, digits = 1), '%')
+      
+      dx = matrix(0, nrow = length(satellite$lon), ncol = length(satellite$lat))
+      dy = matrix(0, nrow = length(satellite$lon), ncol = length(satellite$lat))
+      
+      for (i in 1:length(satellite$lon)) {
+        for (j in 1:length(satellite$lat)) {
+          if (i == 1) {
+            dx[i,j] = geosphere::distCosine(p1 = c(satellite$lon[2], satellite$lat[j]), p2 = c(satellite$lon[1], satellite$lat[j]))
+          } else {
+            dx[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[j]), p2 = c(satellite$lon[i-1], satellite$lat[j]))
+          }
+          if (j == 1) {
+            dy[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[2]), p2 = c(satellite$lon[i], satellite$lat[1]))
+          } else {
+            dy[i,j] = geosphere::distCosine(p1 = c(satellite$lon[i], satellite$lat[j]), p2 = c(satellite$lon[i], satellite$lat[j-1]))
+          }
+        }
+      }
+      satellite$dx = dx
+      satellite$dy = dy
+      
+      ## Add advection
+      satellite$adv = calc.oscar.advdiff(satellite)
+      
+      ## Save output
+      message(Sys.time(), ': Saving to file ', file.name)
+      save(satellite, file = file.name)
+      
+      
+      message(Sys.time(), ': Printing pictures to -> ', image.file)
+      png(image.file, width = 1600, 1200)
+      par(mfrow=c(2,2), plt = c(0.1,0.9,0.1,0.8))
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$field, pal = 'ocean.matter', zlim = c(0,2))
+      redraw.map(map); mtext('SSS', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$adv$U/(satellite$dx * satellite$dy), pal = 'ocean.balance', zlim = c(-1,1))
+      redraw.map(map); mtext('MLR1', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, sqrt(satellite$adv$U^2 + satellite$adv$V^2)/(satellite$dx * satellite$dy), pal = 'inferno', zlim = c(0,2))
+      redraw.map(map); mtext('MLR1-MLR2', cex = 0.7, adj = 0)
+      
+      map = make.map('coastlineWorldFine', lon.min = -95, lon.max = -83, lat.min = 20, lat.max = 30.5, land.col = '#414141', p = '+proj=aea +lat_1=24 +lat_2=29 +lon_0=-90', dlon = 5, dlat = 5)
+      add.map.layer(satellite$lon, satellite$lat, satellite$adv$V/(satellite$dx * satellite$dy), pal = 'ocean.balance', zlim = c(-1,1))
+      redraw.map(map); mtext('MLR2', cex = 0.7, adj = 0)
+      
+      dev.off()
+    }
+  }
+  
+  
+  message(Sys.time(), ': Sleeping.')
+  Sys.sleep(60*60)
+}
+
+
+
+
+
+
+
+
+
+
